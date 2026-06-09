@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RideGo — Passenger Dashboard</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="stylesheet" href="css/dashboard.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&display=swap" rel="stylesheet" />
+</head>
+<body class="dashboard-page user-theme">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-icon">
+        <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
+          <circle cx="14" cy="14" r="13" stroke="currentColor" stroke-width="2"/>
+          <path d="M8 18 L14 8 L20 18" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="14" cy="18" r="2" fill="currentColor"/>
+        </svg>
+      </div>
+      <span>RideGo</span>
+    </div>
+
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-panel="book">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 2L9 16M2 9L16 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        Book a Ride
+      </a>
+      <a href="#" class="nav-item" data-panel="history">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="7" stroke="currentColor" stroke-width="1.5"/><path d="M9 5v4l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+        My Rides
+      </a>
+    </nav>
+
+    <div class="sidebar-user">
+      <div class="user-avatar" id="user-avatar-sidebar">J</div>
+      <div class="user-info">
+        <div class="user-name" id="sidebar-username">Loading…</div>
+        <div class="user-role-label">Passenger</div>
+      </div>
+      <button class="logout-btn" id="logout-btn" title="Sign out">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 2H3a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3M10 11l4-4-4-4M14 8H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main content -->
+  <main class="dashboard-main">
+
+    <!-- Header -->
+    <header class="dash-header">
+      <div>
+        <h2 class="dash-title" id="panel-title">Book a Ride</h2>
+        <p class="dash-subtitle" id="panel-subtitle">Where do you want to go today?</p>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn refresh-btn" id="refresh-btn" title="Refresh">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M3 9a6 6 0 1 0 1.5-3.9" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><path d="M3 4.5V9H7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- PANEL: Book Ride -->
+    <section class="panel active" id="panel-book">
+      <div class="book-card">
+        <div class="route-visual">
+          <div class="route-dot pickup-dot"></div>
+          <div class="route-line"></div>
+          <div class="route-dot drop-dot"></div>
+        </div>
+        <div class="route-inputs">
+          <div class="field">
+            <label for="pickup">Pickup Location</label>
+            <input type="text" id="pickup" placeholder="Enter pickup address" />
+          </div>
+          <div class="field">
+            <label for="drop">Drop Location</label>
+            <input type="text" id="drop" placeholder="Enter destination" />
+          </div>
+          <div class="schedule-grid">
+            <div class="field">
+              <label for="schedule-date">Ride Date</label>
+              <input type="date" id="schedule-date" />
+            </div>
+            <div class="field">
+              <label for="schedule-time">Ride Time</label>
+              <input type="time" id="schedule-time" />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="route-tools">
+        <button class="btn-secondary" id="current-location-btn" type="button">
+          <svg width="16" height="16" viewBox="0 0 18 18" fill="none"><circle cx="9" cy="9" r="3" stroke="currentColor" stroke-width="1.5"/><path d="M9 1.5v3M9 13.5v3M1.5 9h3M13.5 9h3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Use Current Location
+        </button>
+        <button class="btn-secondary" id="preview-route-btn" type="button">
+          <svg width="16" height="16" viewBox="0 0 18 18" fill="none"><path d="M3 14c3-8 9 2 12-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3" cy="14" r="1.5" fill="currentColor"/><circle cx="15" cy="8" r="1.5" fill="currentColor"/></svg>
+          Preview Route
+        </button>
+      </div>
+
+      <div class="route-summary hidden" id="route-summary">
+        <div class="route-metric">
+          <span class="metric-label">Distance</span>
+          <strong id="route-distance">-</strong>
+        </div>
+        <div class="route-metric">
+          <span class="metric-label">ETA</span>
+          <strong id="route-eta">-</strong>
+        </div>
+        <div class="route-metric">
+          <span class="metric-label">Sedan Fare</span>
+          <strong id="sedan-fare">-</strong>
+        </div>
+        <div class="route-metric">
+          <span class="metric-label">SUV Fare</span>
+          <strong id="suv-fare">-</strong>
+        </div>
+        <div class="route-metric">
+          <span class="metric-label">Premium Fare</span>
+          <strong id="premium-fare">-</strong>
+        </div>
+      </div>
+
+      <div class="map-shell hidden" id="map-shell">
+        <div id="route-map" class="route-map"></div>
+      </div>
+
+      <section class="ai-recommendation hidden" id="ai-recommendation">
+        <div class="ai-header">
+          <span class="ai-eyebrow">Gemini Recommendation</span>
+          <span class="ai-status" id="ai-status"></span>
+        </div>
+        <div class="ai-options">
+          <div>
+            <span>Best Value</span>
+            <strong id="best-value-option">-</strong>
+          </div>
+          <div>
+            <span>Best Comfort</span>
+            <strong id="best-comfort-option">-</strong>
+          </div>
+          <div>
+            <span>Best Premium</span>
+            <strong id="best-premium-option">-</strong>
+          </div>
+        </div>
+        <p id="recommendation-summary">Generating recommendation...</p>
+      </section>
+
+      <section class="vehicle-selection hidden" id="vehicle-selection">
+        <input type="hidden" id="vehicle-type" value="" />
+        <div class="vehicle-selection-header">
+          <span class="metric-label">Choose Vehicle</span>
+        </div>
+        <div class="vehicle-card-grid">
+          <button class="vehicle-card" type="button" data-vehicle="Sedan">
+            <span>Sedan</span>
+            <strong id="vehicle-card-sedan-fare">-</strong>
+            <small>Lowest fare</small>
+          </button>
+          <button class="vehicle-card" type="button" data-vehicle="SUV">
+            <span>SUV</span>
+            <strong id="vehicle-card-suv-fare">-</strong>
+            <small>Groups and luggage</small>
+          </button>
+          <button class="vehicle-card" type="button" data-vehicle="Premium">
+            <span>Premium</span>
+            <strong id="vehicle-card-premium-fare">-</strong>
+            <small>Highest comfort</small>
+          </button>
+        </div>
+      </section>
+
+      <div class="alert" id="book-alert"></div>
+
+      <button class="btn-primary btn-large" id="book-btn">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M9 2L9 16M2 9L16 9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <span class="btn-text">Request Ride</span>
+        <span class="btn-loader hidden"></span>
+      </button>
+
+      <!-- Recent booked ride status (if any) -->
+      <div class="recent-ride hidden" id="recent-ride">
+        <div class="recent-ride-header">Latest Booking</div>
+        <div class="ride-status-card" id="recent-ride-card"></div>
+      </div>
+    </section>
+
+    <!-- PANEL: Ride History -->
+    <section class="panel hidden" id="panel-history">
+      <div class="alert" id="history-alert"></div>
+      <div class="rides-list" id="rides-list">
+        <div class="loading-state">
+          <div class="spinner"></div>
+          <p>Loading your rides…</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="js/user-dashboard.js"></script>
+</body>
+</html>
