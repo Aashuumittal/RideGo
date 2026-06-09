@@ -44,32 +44,35 @@ RideGo demonstrates modern backend engineering practices, third-party API integr
 
 ## 📸 Screenshots
 
-### Login & Registration
+<h3 align="center">Login & Registration</h3>
+<p align="center">
+  <img src="screenshots/login.png" width="900">
+</p>
 
-![Login Page](screenshots/login.png)
+<h3 align="center">Route Preview with Live Map</h3>
+<p align="center">
+  <img src="screenshots/route-preview.png" width="900">
+</p>
 
-### Route Preview with Live Map
+<h3 align="center">AI Vehicle Recommendation</h3>
+<p align="center">
+  <img src="screenshots/ai-recommendation.png" width="900">
+</p>
 
-![Route Preview](screenshots/route-preview.png)
+<h3 align="center">Ride History</h3>
+<p align="center">
+  <img src="screenshots/ride-history.png" width="900">
+</p>
 
-### AI Vehicle Recommendation
+<h3 align="center">Razorpay Payment Gateway</h3>
+<p align="center">
+  <img src="screenshots/payment-gateway.png" width="900">
+</p>
 
-![AI Recommendation](screenshots/ai-recommendation.png)
-
-### Ride History
-
-![Ride History](screenshots/ride-history.png)
-
-### Razorpay Payment Flow
-
-![Razorpay Payment](screenshots/payment.png)
-
-### Driver Dashboard
-
-![Driver Dashboard](screenshots/driver-dashboard.png)
-
-> Replace the image paths with your actual screenshot locations.
-
+<h3 align="center">Driver Dashboard</h3>
+<p align="center">
+  <img src="screenshots/driver-dashboard.png" width="900">
+</p>
 ---
 
 ## 🏗️ System Architecture
