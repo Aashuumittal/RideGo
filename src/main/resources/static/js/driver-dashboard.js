@@ -97,6 +97,9 @@ function requestCardHTML(ride, withActions, historyActions = false) {
     ? `<span>${(ride.distanceMeters / 1000).toFixed(2)} km</span><span>${formatEta(ride.durationSeconds / 60)}</span>`
     : '';
   const fare = ride.fare ? `<span>Fare: ${formatMoney(ride.fare)}</span>` : '';
+  const capacity = ride.passengerCount
+    ? `<span>${ride.passengerCount} passenger${ride.passengerCount === 1 ? '' : 's'} · ${ride.luggageCount || 0} bag${ride.luggageCount === 1 ? '' : 's'}</span>`
+    : '';
   const payment = ride.paymentStatus ? `<span>Payment: ${escapeHtml(ride.paymentStatus)}</span>` : '';
 
   return `
@@ -110,7 +113,7 @@ function requestCardHTML(ride, withActions, historyActions = false) {
           <span class="status-badge status-${ride.status}">${ride.status}</span>
           <span>${date}</span>
           <span>${escapeHtml(ride.vehicleType || '-')}</span>
-          ${routeMeta}${fare}${scheduled}${payment}
+          ${routeMeta}${fare}${capacity}${scheduled}${payment}
         </div>
       </div>
       ${withActions ? `<div class="ride-actions"><button class="btn-action btn-accept" data-action="accept" data-ride-id="${ride.id}">Accept</button></div>` : ''}

@@ -9,7 +9,8 @@ let dropMarker;
 let currentLocationMarker;
 let currentPickupCoordinate = null;
 let activeRoutePlan = null;
-let activeRecommendation = null;
+let activePlanner = null;
+let plannerRequestId = 0;
 
 (function () {
   const user = API.getUser();
@@ -36,6 +37,33 @@ document.getElementById('book-btn').addEventListener('click', bookRide);
 ['pickup', 'drop'].forEach(id => {
   document.getElementById(id).addEventListener('input', resetPreview);
 });
+
+['passenger-count', 'luggage-count'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    if (!activeRoutePlan) return;
+    showVehicleSelection(activeRoutePlan);
+    // Re-run upfront planner with updated passengers/luggage
+    triggerUPfrontPlanner(activeRoutePlan);
+  });
+});
+
+['schedule-date', 'schedule-time'].forEach(id => {
+  const input = document.getElementById(id);
+  input.addEventListener('click', () => {
+    try { input.showPicker?.(); } catch { input.focus(); }
+  });
+  input.addEventListener('change', () => {
+    if (!activeRoutePlan) return;
+    // If a vehicle is already selected, refresh for that vehicle; otherwise refresh upfront
+    const vehicleType = document.getElementById('vehicle-type').value;
+    if (vehicleType) {
+      loadVehicleRecommendation(activeRoutePlan, vehicleType);
+    } else {
+      triggerUPfrontPlanner(activeRoutePlan);
+    }
+  });
+});
+
 document.querySelectorAll('.vehicle-card').forEach(card => {
   card.addEventListener('click', () => selectVehicle(card.dataset.vehicle));
 });
@@ -48,11 +76,15 @@ document.querySelectorAll('.nav-item').forEach(item => {
 });
 
 document.getElementById('refresh-btn').addEventListener('click', () => {
+  const btn = document.getElementById('refresh-btn');
   const active = document.querySelector('.nav-item.active');
+  btn.classList.add('spinning');
   if (active?.dataset.panel === 'history') {
-    document.getElementById('refresh-btn').classList.add('spinning');
-    loadRideHistory().finally(() => document.getElementById('refresh-btn').classList.remove('spinning'));
+    loadRideHistory().finally(() => btn.classList.remove('spinning'));
+    return;
   }
+  const canPreview = document.getElementById('pickup').value.trim() && document.getElementById('drop').value.trim();
+  (canPreview ? previewRoute() : Promise.resolve()).finally(() => btn.classList.remove('spinning'));
 });
 
 function switchPanel(name) {
@@ -73,7 +105,6 @@ function switchPanel(name) {
 
 function initRouteMap() {
   if (routeMap || !window.L) return;
-
   routeMap = L.map('route-map', { zoomControl: true, scrollWheelZoom: true }).setView([20.5937, 78.9629], 5);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
@@ -89,7 +120,7 @@ function showMap() {
 
 function resetPreview() {
   activeRoutePlan = null;
-  activeRecommendation = null;
+  activePlanner = null;
   hideRouteSummary();
   hideAiRecommendation();
   hideVehicleSelection();
@@ -109,25 +140,25 @@ function useCurrentLocation() {
   hideAlert(alert);
 
   navigator.geolocation.getCurrentPosition(
-    position => {
-      const { latitude, longitude } = position.coords;
-      currentPickupCoordinate = { latitude, longitude };
-      document.getElementById('pickup').value = 'Current location';
-      resetPreview();
-      showMap();
-      showCurrentLocation(latitude, longitude);
-      showAlert(alert, 'success', 'Current location selected as pickup.');
-      btn.disabled = false;
-    },
-    error => {
-      currentPickupCoordinate = null;
-      btn.disabled = false;
-      const message = error.code === error.PERMISSION_DENIED
-        ? 'Location permission denied. Enter your pickup address manually.'
-        : 'Could not detect your location. Enter your pickup address manually.';
-      showAlert(alert, 'error', message);
-    },
-    { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
+      position => {
+        const { latitude, longitude } = position.coords;
+        currentPickupCoordinate = { latitude, longitude };
+        document.getElementById('pickup').value = 'Current location';
+        resetPreview();
+        showMap();
+        showCurrentLocation(latitude, longitude);
+        showAlert(alert, 'success', 'Current location selected as pickup.');
+        btn.disabled = false;
+      },
+      error => {
+        currentPickupCoordinate = null;
+        btn.disabled = false;
+        const message = error.code === error.PERMISSION_DENIED
+            ? 'Location permission denied. Enter your pickup address manually.'
+            : 'Could not detect your location. Enter your pickup address manually.';
+        showAlert(alert, 'error', message);
+      },
+      { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 }
   );
 }
 
@@ -155,10 +186,12 @@ async function previewRoute() {
     renderRoute(routePlan);
     showRouteSummary(routePlan);
     showVehicleSelection(routePlan);
-    await loadVehicleRecommendation(routePlan);
+
+    // Automatically trigger upfront AI recommendation before any vehicle is selected
+    triggerUPfrontPlanner(routePlan);
   } catch (err) {
     activeRoutePlan = null;
-    activeRecommendation = null;
+    activePlanner = null;
     clearRoute();
     hideRouteSummary();
     hideAiRecommendation();
@@ -167,6 +200,28 @@ async function previewRoute() {
   } finally {
     setRouteLoading(false);
   }
+}
+
+/**
+ * Fires the AI planner using the backend-recommended vehicle (or Sedan as fallback)
+ * so the user gets guidance BEFORE selecting a vehicle card.
+ */
+function triggerUPfrontPlanner(routePlan) {
+  const passengers = getPassengerCount();
+  const luggage = getLuggageCount();
+  const options = getVehicleOptions(routePlan);
+
+  // Pick the smallest suitable vehicle as the "selected" vehicle for the upfront call
+  const recommendationOrder = ['Sedan', 'Premium', 'SUV'];
+  const upfrontVehicle = recommendationOrder
+      .map(type => options.find(o => o.type === type))
+      .find(o => o && passengers <= o.seatingCapacity && luggage <= o.luggageCapacity);
+
+  // If nothing fits (e.g. 10 passengers), just use Sedan so Gemini can still warn them
+  const vehicleForCall = upfrontVehicle?.type || 'Sedan';
+
+  // Don't change the selected card highlight — only update the planner panel
+  loadVehicleRecommendation(routePlan, vehicleForCall, /* upfront= */ true);
 }
 
 function showCurrentLocation(latitude, longitude) {
@@ -185,11 +240,11 @@ function renderRoute(routePlan) {
   }).addTo(routeMap);
 
   pickupMarker = L.marker([routePlan.pickup.latitude, routePlan.pickup.longitude])
-    .addTo(routeMap)
-    .bindPopup(`Pickup: ${escapeHtml(routePlan.pickup.label)}`);
+      .addTo(routeMap)
+      .bindPopup(`Pickup: ${escapeHtml(routePlan.pickup.label)}`);
   dropMarker = L.marker([routePlan.drop.latitude, routePlan.drop.longitude])
-    .addTo(routeMap)
-    .bindPopup(`Destination: ${escapeHtml(routePlan.drop.label)}`);
+      .addTo(routeMap)
+      .bindPopup(`Destination: ${escapeHtml(routePlan.drop.label)}`);
 
   const bounds = routeLayer.getBounds();
   if (bounds.isValid()) routeMap.fitBounds(bounds, { padding: [28, 28] });
@@ -220,43 +275,82 @@ function hideRouteSummary() {
   document.getElementById('premium-fare').textContent = '-';
 }
 
-async function loadVehicleRecommendation(routePlan) {
-  showAiLoading();
+/**
+ * @param {object} routePlan
+ * @param {string} vehicleType
+ * @param {boolean} upfront - if true, don't change the selected card state
+ */
+async function loadVehicleRecommendation(routePlan, vehicleType, upfront = false) {
+  const requestId = ++plannerRequestId;
+  activePlanner = null;
+  showAiLoading(upfront);
+
   try {
-    const recommendation = await API.getVehicleRecommendation({
+    const recommendation = await API.getRidePlan({
+      pickupLocation: document.getElementById('pickup').value.trim(),
+      destination: document.getElementById('drop').value.trim(),
       distanceKm: routePlan.distanceKilometers,
-      etaMinutes: routePlan.durationMinutes,
-      sedanFare: routePlan.sedanFare,
-      suvFare: routePlan.suvFare,
-      premiumFare: routePlan.premiumFare,
+      selectedVehicle: vehicleType,
+      passengerCount: getPassengerCount(),
+      luggageCount: getLuggageCount(),
+      scheduledPickupAt: getScheduledPickupAt() || null,
     });
-    activeRecommendation = recommendation;
-    showAiRecommendation(recommendation);
+
+    if (requestId !== plannerRequestId) return; // stale response
+
+    // For upfront call: only update if no card has been selected yet
+    const currentSelected = document.getElementById('vehicle-type').value;
+    if (upfront && currentSelected) return;
+
+    // For vehicle-card call: only update if the vehicle still matches
+    if (!upfront && currentSelected !== vehicleType) return;
+
+    activePlanner = recommendation;
+    showAiRecommendation(recommendation, upfront);
   } catch (err) {
-    activeRecommendation = null;
+    if (requestId !== plannerRequestId) return;
+    activePlanner = null;
     showAiUnavailable(err.message || 'Recommendation is unavailable.');
   }
 }
 
-function showAiLoading() {
+function showAiLoading(upfront = false) {
   const section = document.getElementById('ai-recommendation');
   section.classList.remove('hidden');
   section.classList.add('loading');
-  document.getElementById('ai-status').textContent = 'Generating...';
-  document.getElementById('best-value-option').textContent = '-';
-  document.getElementById('best-comfort-option').textContent = '-';
-  document.getElementById('best-premium-option').textContent = '-';
-  document.getElementById('recommendation-summary').textContent = 'Gemini is reviewing distance, ETA, and fare options.';
+  document.getElementById('ai-status').textContent = upfront ? 'Analysing trip...' : 'Generating...';
+  document.getElementById('planner-facts').innerHTML = '';
+  document.getElementById('recommendation-summary').textContent = upfront
+      ? 'Getting AI recommendation for your trip...'
+      : 'Building guidance from backend-calculated trip details...';
+  document.getElementById('capacity-warning').classList.add('hidden');
 }
 
-function showAiRecommendation(recommendation) {
+function showAiRecommendation(recommendation, upfront = false) {
   const section = document.getElementById('ai-recommendation');
   section.classList.remove('hidden', 'loading', 'unavailable');
-  document.getElementById('ai-status').textContent = 'Ready';
-  document.getElementById('best-value-option').textContent = recommendation.bestValueOption || 'Sedan';
-  document.getElementById('best-comfort-option').textContent = recommendation.bestComfortOption || 'SUV';
-  document.getElementById('best-premium-option').textContent = recommendation.bestPremiumOption || 'Premium';
-  document.getElementById('recommendation-summary').textContent = recommendation.recommendationSummary || '';
+
+  if (upfront) {
+    // Upfront view: show only the AI guidance text, no per-vehicle facts grid
+    document.getElementById('ai-status').textContent = recommendation.aiGenerated ? 'AI Recommendation' : 'Recommendation';
+    document.getElementById('planner-facts').innerHTML = '';
+    document.getElementById('recommendation-summary').textContent = recommendation.plannerGuidance || '';
+  } else {
+    // Post-selection view: show full facts grid + guidance
+    document.getElementById('ai-status').textContent = recommendation.aiGenerated ? 'AI guidance ready' : 'Plan ready';
+    document.getElementById('planner-facts').innerHTML = `
+      <div><span>Selected</span><strong>${escapeHtml(recommendation.selectedVehicle)}</strong></div>
+      <div><span>ETA</span><strong>${formatEta(recommendation.etaMinutes)}</strong></div>
+      <div><span>Recommended</span><strong>${escapeHtml(recommendation.recommendedVehicle || 'No single vehicle')}</strong></div>
+      <div><span>Capacity</span><strong>${recommendation.seatingCapacity} seats · ${recommendation.luggageCapacity} bags</strong></div>
+      <div><span>Fare</span><strong>${formatMoney(recommendation.fare)}</strong></div>
+      <div><span>Est. Arrival</span><strong>${formatPlannerTime(recommendation.estimatedArrivalAt)}</strong></div>`;
+    document.getElementById('recommendation-summary').textContent = recommendation.plannerGuidance || '';
+  }
+
+  const warning = document.getElementById('capacity-warning');
+  warning.textContent = recommendation.capacityWarning || '';
+  warning.classList.toggle('hidden', recommendation.suitable);
 }
 
 function showAiUnavailable(message) {
@@ -264,10 +358,8 @@ function showAiUnavailable(message) {
   section.classList.remove('hidden', 'loading');
   section.classList.add('unavailable');
   document.getElementById('ai-status').textContent = 'Unavailable';
-  document.getElementById('best-value-option').textContent = 'Sedan';
-  document.getElementById('best-comfort-option').textContent = 'SUV';
-  document.getElementById('best-premium-option').textContent = 'Premium';
-  document.getElementById('recommendation-summary').textContent = `${message} You can still choose any available vehicle.`;
+  document.getElementById('planner-facts').innerHTML = '';
+  document.getElementById('recommendation-summary').textContent = `${message} You can still choose a suitable vehicle.`;
 }
 
 function hideAiRecommendation() {
@@ -279,30 +371,57 @@ function hideAiRecommendation() {
 
 function showVehicleSelection(routePlan) {
   document.getElementById('vehicle-selection').classList.remove('hidden');
-  document.getElementById('vehicle-card-sedan-fare').textContent = formatMoney(routePlan.sedanFare);
-  document.getElementById('vehicle-card-suv-fare').textContent = formatMoney(routePlan.suvFare);
-  document.getElementById('vehicle-card-premium-fare').textContent = formatMoney(routePlan.premiumFare);
+  const passengers = getPassengerCount();
+  const luggage = getLuggageCount();
+  const options = getVehicleOptions(routePlan);
+  const recommendationOrder = ['Sedan', 'Premium', 'SUV'];
+  const recommended = recommendationOrder
+      .map(type => options.find(option => option.type === type))
+      .find(option => option && passengers <= option.seatingCapacity && luggage <= option.luggageCapacity);
+
+  options.forEach(option => {
+    const slug = option.type.toLowerCase();
+    const suitable = passengers <= option.seatingCapacity && luggage <= option.luggageCapacity;
+    document.getElementById(`vehicle-card-${slug}-fare`).textContent = formatMoney(option.fare);
+    document.getElementById(`vehicle-card-${slug}-details`).textContent =
+        `${option.seatingCapacity} passengers · ${option.luggageCapacity} bags · ${formatEta(option.etaMinutes)}`;
+    document.getElementById(`vehicle-card-${slug}-suitability`).textContent = suitable ? '' : 'Does not fit this trip';
+    const card = document.querySelector(`[data-vehicle="${option.type}"]`);
+    card.classList.toggle('unsuitable', !suitable);
+    card.classList.toggle('recommended', recommended?.type === option.type);
+  });
 }
 
 function hideVehicleSelection() {
   document.getElementById('vehicle-selection').classList.add('hidden');
   document.getElementById('vehicle-type').value = '';
-  document.querySelectorAll('.vehicle-card').forEach(card => card.classList.remove('selected'));
+  document.querySelectorAll('.vehicle-card').forEach(card => card.classList.remove('selected', 'recommended', 'unsuitable'));
 }
 
-function selectVehicle(vehicleType) {
+async function selectVehicle(vehicleType) {
   document.getElementById('vehicle-type').value = vehicleType;
   document.querySelectorAll('.vehicle-card').forEach(card => {
     card.classList.toggle('selected', card.dataset.vehicle === vehicleType);
   });
+  // After selecting a card, load the full per-vehicle planner (upfront=false)
+  await loadVehicleRecommendation(activeRoutePlan, vehicleType, false);
+}
+
+function getVehicleOptions(routePlan) {
+  if (routePlan.vehicleOptions?.length) return routePlan.vehicleOptions;
+  return [
+    { type: 'Sedan', seatingCapacity: 4, luggageCapacity: 2, etaMinutes: routePlan.durationMinutes, fare: routePlan.sedanFare },
+    { type: 'SUV', seatingCapacity: 6, luggageCapacity: 4, etaMinutes: routePlan.durationMinutes, fare: routePlan.suvFare },
+    { type: 'Premium', seatingCapacity: 4, luggageCapacity: 3, etaMinutes: routePlan.durationMinutes, fare: routePlan.premiumFare },
+  ];
 }
 
 function setRouteLoading(loading) {
   const btn = document.getElementById('preview-route-btn');
   btn.disabled = loading;
   btn.innerHTML = loading
-    ? 'Calculating...'
-    : `<svg width="16" height="16" viewBox="0 0 18 18" fill="none"><path d="M3 14c3-8 9 2 12-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3" cy="14" r="1.5" fill="currentColor"/><circle cx="15" cy="8" r="1.5" fill="currentColor"/></svg>Preview Route`;
+      ? 'Calculating...'
+      : `<svg width="16" height="16" viewBox="0 0 18 18" fill="none"><path d="M3 14c3-8 9 2 12-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><circle cx="3" cy="14" r="1.5" fill="currentColor"/><circle cx="15" cy="8" r="1.5" fill="currentColor"/></svg>Preview Route`;
 }
 
 async function bookRide() {
@@ -310,18 +429,27 @@ async function bookRide() {
   const drop = document.getElementById('drop').value.trim();
   const vehicleType = document.getElementById('vehicle-type').value;
   const alert = document.getElementById('book-alert');
-  const scheduledAt = getScheduledAt();
+  const scheduledPickupAt = getScheduledPickupAt();
 
   if (!pickup || !drop || !vehicleType) {
-    showAlert(alert, 'error', 'Please enter pickup, destination, and vehicle type.');
+    showAlert(alert, 'error', 'Please enter pickup, destination, and select a vehicle.');
     return;
   }
   if (!activeRoutePlan) {
     showAlert(alert, 'error', 'Preview the route before booking so distance, ETA, and fare can be saved.');
     return;
   }
-  if (scheduledAt === false) {
-    showAlert(alert, 'error', 'Select both date and time for scheduled rides.');
+  if (scheduledPickupAt === false) {
+    showAlert(alert, 'error', 'Select both pickup date and time, or leave both empty.');
+    return;
+  }
+  if (activePlanner && !activePlanner.suitable) {
+    showAlert(alert, 'error', activePlanner.capacityWarning);
+    return;
+  }
+  const selectedOption = getVehicleOptions(activeRoutePlan).find(option => option.type === vehicleType);
+  if (getPassengerCount() > selectedOption.seatingCapacity || getLuggageCount() > selectedOption.luggageCapacity) {
+    showAlert(alert, 'error', `${vehicleType} supports up to ${selectedOption.seatingCapacity} passengers and ${selectedOption.luggageCapacity} bags. Choose a suitable vehicle.`);
     return;
   }
 
@@ -329,7 +457,7 @@ async function bookRide() {
   hideAlert(alert);
 
   try {
-    const ride = await API.createRide(pickup, drop, buildRideRouteDetails(vehicleType, scheduledAt));
+    const ride = await API.createRide(pickup, drop, buildRideRouteDetails(vehicleType, scheduledPickupAt));
     showAlert(alert, 'success', 'Ride requested. A matching driver will see it now.');
     resetBookingForm();
     showRecentRide(ride);
@@ -340,7 +468,11 @@ async function bookRide() {
   }
 }
 
-function getScheduledAt() {
+/**
+ * Returns the user's chosen pickup datetime as an ISO string,
+ * null if both fields are empty, or false if only one is filled.
+ */
+function getScheduledPickupAt() {
   const date = document.getElementById('schedule-date').value;
   const time = document.getElementById('schedule-time').value;
   if (!date && !time) return null;
@@ -348,16 +480,19 @@ function getScheduledAt() {
   return `${date}T${time}`;
 }
 
-function buildRideRouteDetails(vehicleType, scheduledAt) {
+function buildRideRouteDetails(vehicleType, scheduledPickupAt) {
+  const option = getVehicleOptions(activeRoutePlan).find(item => item.type === vehicleType);
   return {
     pickupLatitude: activeRoutePlan.pickup.latitude,
     pickupLongitude: activeRoutePlan.pickup.longitude,
     dropLatitude: activeRoutePlan.drop.latitude,
     dropLongitude: activeRoutePlan.drop.longitude,
     distanceMeters: activeRoutePlan.distanceMeters,
-    durationSeconds: activeRoutePlan.durationSeconds,
+    durationSeconds: option.etaMinutes * 60,
     vehicleType,
-    scheduledAt,
+    scheduledAt: scheduledPickupAt || null,
+    passengerCount: getPassengerCount(),
+    luggageCount: getLuggageCount(),
   };
 }
 
@@ -365,10 +500,14 @@ function resetBookingForm() {
   ['pickup', 'drop', 'vehicle-type', 'schedule-date', 'schedule-time'].forEach(id => {
     document.getElementById(id).value = '';
   });
+  document.getElementById('passenger-count').value = '1';
+  document.getElementById('luggage-count').value = '0';
   currentPickupCoordinate = null;
   activeRoutePlan = null;
   clearRoute();
   hideRouteSummary();
+  hideAiRecommendation();
+  hideVehicleSelection();
   document.getElementById('map-shell').classList.add('hidden');
 }
 
@@ -400,7 +539,6 @@ function renderRideList(container, rides, withActions) {
     container.innerHTML = `<div class="empty-state"><p>No rides yet</p><span>Book your first ride to get started</span></div>`;
     return;
   }
-
   const sorted = [...rides].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   container.innerHTML = sorted.map(r => rideCardHTML(r, withActions)).join('');
   attachRideActionHandlers(container);
@@ -408,15 +546,18 @@ function renderRideList(container, rides, withActions) {
 
 function rideCardHTML(ride, withActions) {
   const date = formatDate(ride.createdAt);
-  const scheduled = ride.scheduledAt ? `<span>Scheduled: ${formatDate(ride.scheduledAt)}</span>` : '';
+  const scheduled = ride.scheduledAt ? `<span>Pickup: ${formatDate(ride.scheduledAt)}</span>` : '';
   const canComplete = ride.status === 'ACCEPTED' && withActions;
   const canCancel = ['REQUESTED', 'ACCEPTED'].includes(ride.status) && withActions;
   const canPay = ride.status === 'COMPLETED' && ride.paymentStatus !== 'PAID' && withActions;
   const canRate = ['COMPLETED', 'PAID'].includes(ride.status) && !ride.driverRating && ride.driverId && withActions;
   const routeMeta = ride.distanceMeters && ride.durationSeconds
-    ? `<span>${(ride.distanceMeters / 1000).toFixed(2)} km</span><span>${formatEta(ride.durationSeconds / 60)}</span>`
-    : '';
+      ? `<span>${(ride.distanceMeters / 1000).toFixed(2)} km</span><span>${formatEta(ride.durationSeconds / 60)}</span>`
+      : '';
   const fare = ride.fare ? `<span>Fare: ${formatMoney(ride.fare)}</span>` : '';
+  const capacity = ride.passengerCount
+      ? `<span>${ride.passengerCount} passenger${ride.passengerCount === 1 ? '' : 's'} · ${ride.luggageCount || 0} bag${ride.luggageCount === 1 ? '' : 's'}</span>`
+      : '';
   const driver = ride.driverName ? `
     <div class="driver-detail-grid">
       <span>Driver: ${escapeHtml(ride.driverName)}</span>
@@ -438,7 +579,7 @@ function rideCardHTML(ride, withActions) {
           <span class="status-badge status-${ride.status}">${ride.status}</span>
           <span>${date}</span>
           <span>${escapeHtml(ride.vehicleType || '-')}</span>
-          ${routeMeta}${fare}${scheduled}${rating}
+          ${routeMeta}${fare}${capacity}${scheduled}${rating}
         </div>
         ${driver}
       </div>
@@ -559,23 +700,21 @@ function formatEta(minutes) {
   const mins = rounded % 60;
   return mins ? `${hours} hr ${mins} min` : `${hours} hr`;
 }
-
-function formatMoney(value) {
-  return `₹${Number(value || 0).toFixed(2)}`;
-}
-
+function formatMoney(value) { return `₹${Number(value || 0).toFixed(2)}`; }
 function formatDate(value) {
   return value ? new Date(value).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : '-';
 }
-
-function showAlert(el, type, msg) {
-  el.className = `alert ${type}`;
-  el.textContent = msg;
+function formatPlannerTime(value) {
+  return value ? new Date(value).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'Not scheduled';
 }
-function hideAlert(el) {
-  el.className = 'alert';
-  el.textContent = '';
+function getPassengerCount() {
+  return Math.max(1, Number.parseInt(document.getElementById('passenger-count').value, 10) || 1);
 }
+function getLuggageCount() {
+  return Math.max(0, Number.parseInt(document.getElementById('luggage-count').value, 10) || 0);
+}
+function showAlert(el, type, msg) { el.className = `alert ${type}`; el.textContent = msg; }
+function hideAlert(el) { el.className = 'alert'; el.textContent = ''; }
 function setBtnLoading(btnId, loading) {
   const btn = document.getElementById(btnId);
   const text = btn.querySelector('.btn-text');
@@ -586,8 +725,5 @@ function setBtnLoading(btnId, loading) {
 }
 function escapeHtml(str) {
   return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }

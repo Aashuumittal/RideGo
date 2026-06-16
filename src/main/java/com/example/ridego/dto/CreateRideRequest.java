@@ -1,6 +1,7 @@
 package com.example.ridego.dto;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Min;
 import lombok.Data;
 
 import java.time.LocalDateTime;
@@ -23,5 +24,13 @@ public class CreateRideRequest {
     private Double dropLongitude;
     private Double distanceMeters;
     private Double durationSeconds;
+
+    // The user's chosen pickup/departure date & time
     private LocalDateTime scheduledAt;
+
+    @Min(value = 1, message = "At least one passenger is required")
+    private Integer passengerCount = 1;
+
+    @Min(value = 0, message = "Luggage count cannot be negative")
+    private Integer luggageCount = 0;
 }

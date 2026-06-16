@@ -68,7 +68,8 @@ body {
   min-height: 100vh;
   padding: 24px;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 /* Animated background grid */
@@ -445,4 +446,25 @@ body {
 .field select:focus {
   border-color: var(--amber);
   box-shadow: 0 0 0 3px var(--amber-dim);
+}
+
+@media (max-height: 760px), (max-width: 600px) {
+  .auth-page {
+    align-items: flex-start;
+    padding: 16px;
+  }
+  .auth-container {
+    margin: auto 0;
+    padding: 24px 20px 28px;
+  }
+  .brand,
+  .auth-tabs {
+    margin-bottom: 20px;
+  }
+  .form-header {
+    margin-bottom: 18px;
+  }
+  .role-toggle {
+    flex-direction: column;
+  }
 }

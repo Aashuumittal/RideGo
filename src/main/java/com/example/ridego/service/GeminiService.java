@@ -5,5 +5,5 @@ import com.example.ridego.dto.AiRecommendationResponse;
 
 public interface GeminiService {
 
-    AiRecommendationResponse recommendVehicle(AiRecommendationRequest request);
+    AiRecommendationResponse planRide(AiRecommendationRequest request);
 }

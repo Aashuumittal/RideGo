@@ -35,7 +35,11 @@ public class Ride {
 
     private String vehicleType;
     private Double fare;
-    private LocalDateTime scheduledAt;
+    private LocalDateTime scheduledAt; // user's chosen pickup/departure time
+    private Integer passengerCount;
+    private Integer luggageCount;
+    private Integer vehicleSeatingCapacity;
+    private Integer vehicleLuggageCapacity;
 
     private String driverName;
     private String driverPhoneNumber;

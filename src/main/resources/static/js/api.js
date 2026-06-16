@@ -171,7 +171,7 @@ const API = (() => {
     return request('POST', '/api/v1/routes/plan', payload);
   }
 
-  async function getVehicleRecommendation(payload) {
+  async function getRidePlan(payload) {
     return request('POST', '/api/v1/ai/recommendation', payload);
   }
 
@@ -182,6 +182,6 @@ const API = (() => {
     register, login, logout,
     createRide, getUserRides, completeRide, cancelRide, rateDriver, createPaymentOrder, verifyPayment,
     getPendingRides, getDriverStats, acceptRide, getDriverRides,
-    geocodeLocation, planRoute, getVehicleRecommendation,
+    geocodeLocation, planRoute, getRidePlan,
   };
 })();

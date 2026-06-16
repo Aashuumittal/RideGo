@@ -2,17 +2,18 @@ package com.example.ridego.service.impl;
 
 import com.example.ridego.dto.AiRecommendationRequest;
 import com.example.ridego.dto.AiRecommendationResponse;
-import com.example.ridego.exception.ExternalServiceException;
 import com.example.ridego.service.GeminiService;
+import com.example.ridego.util.VehicleCatalog;
+import com.example.ridego.util.VehicleCatalog.VehicleSpec;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
-import org.springframework.web.client.RestClientException;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 
@@ -28,7 +29,7 @@ public class GeminiServiceImpl implements GeminiService {
 
     public GeminiServiceImpl(
             @Value("${gemini.api-key:}") String apiKey,
-            @Value("${gemini.model:gemini-1.5-flash}") String model,
+            @Value("${gemini.model:gemini-2.5-flash}") String model,
             ObjectMapper objectMapper) {
         this.apiKey = apiKey;
         this.model = model;
@@ -40,98 +41,205 @@ public class GeminiServiceImpl implements GeminiService {
     }
 
     @Override
-    public AiRecommendationResponse recommendVehicle(AiRecommendationRequest request) {
-        ensureApiKeyConfigured();
+    public AiRecommendationResponse planRide(AiRecommendationRequest request) {
+        VehicleSpec selected = VehicleCatalog.spec(request.getSelectedVehicle());
+        VehicleSpec recommended = VehicleCatalog.recommendSmallestSuitable(
+                request.getPassengerCount(), request.getLuggageCount());
+        boolean suitable = VehicleCatalog.isSuitable(selected, request.getPassengerCount(), request.getLuggageCount());
+
+        double etaMinutes = VehicleCatalog.calculateEtaMinutes(request.getDistanceKm(), selected.type());
+        double fare = VehicleCatalog.calculateFare(request.getDistanceKm(), selected.type());
+
+        // Pre-compute all three vehicles for comparison
+        List<VehicleSpec> allSpecs = VehicleCatalog.all();
+        StringBuilder vehicleComparison = new StringBuilder();
+        for (VehicleSpec spec : allSpecs) {
+            double vEta = VehicleCatalog.calculateEtaMinutes(request.getDistanceKm(), spec.type());
+            double vFare = VehicleCatalog.calculateFare(request.getDistanceKm(), spec.type());
+            boolean vSuitable = VehicleCatalog.isSuitable(spec, request.getPassengerCount(), request.getLuggageCount());
+            vehicleComparison.append(String.format(
+                    "%s: seats=%d luggage=%d etaMinutes=%.1f fare=%.2f suitable=%s%n",
+                    spec.type(), spec.seatingCapacity(), spec.luggageCapacity(), vEta, vFare, vSuitable));
+        }
+
+        LocalDateTime scheduledPickupAt = request.getScheduledPickupAt();
+        long roundedEtaMinutes = Math.max(1, Math.round(etaMinutes));
+        LocalDateTime estimatedArrivalAt = scheduledPickupAt == null
+                ? null : scheduledPickupAt.plusMinutes(roundedEtaMinutes);
+
+        String warning = suitable ? null : capacityWarning(selected, request);
+        String fallbackGuidance = buildFallbackGuidance(
+                request, allSpecs, selected, recommended, suitable, estimatedArrivalAt);
+
+        String aiGuidance = generateGuidance(
+                request, selected, recommended, suitable, warning,
+                etaMinutes, fare, scheduledPickupAt, estimatedArrivalAt,
+                vehicleComparison.toString());
+        String guidance = hasText(aiGuidance) ? aiGuidance : fallbackGuidance;
+
+        return AiRecommendationResponse.builder()
+                .recommendedVehicle(recommended == null ? null : recommended.type())
+                .selectedVehicle(selected.type())
+                .suitable(suitable)
+                .capacityWarning(warning)
+                .passengerCount(request.getPassengerCount())
+                .luggageCount(request.getLuggageCount())
+                .seatingCapacity(selected.seatingCapacity())
+                .luggageCapacity(selected.luggageCapacity())
+                .etaMinutes(etaMinutes)
+                .fare(fare)
+                .scheduledPickupAt(scheduledPickupAt)
+                .estimatedArrivalAt(estimatedArrivalAt)
+                .plannerGuidance(guidance)
+                .aiGenerated(hasText(aiGuidance))
+                .build();
+    }
+
+    private String generateGuidance(
+            AiRecommendationRequest request,
+            VehicleSpec selected,
+            VehicleSpec recommended,
+            boolean suitable,
+            String warning,
+            double etaMinutes,
+            double fare,
+            LocalDateTime scheduledPickupAt,
+            LocalDateTime estimatedArrivalAt,
+            String vehicleComparison) {
+        if (!hasText(apiKey)) {
+            return null;
+        }
 
         Map<String, Object> body = Map.of(
-                "contents", List.of(Map.of(
-                        "parts", List.of(Map.of("text", buildPrompt(request)))
-                )),
-                "generationConfig", Map.of(
-                        "temperature", 0.2,
-                        "responseMimeType", "application/json"
-                )
+                "contents", List.of(Map.of("parts", List.of(Map.of("text", buildPrompt(
+                        request, selected, recommended, suitable, warning, etaMinutes, fare,
+                        scheduledPickupAt, estimatedArrivalAt, vehicleComparison))))),
+                "generationConfig", Map.of("temperature", 0.2, "responseMimeType", "application/json")
         );
 
         try {
             JsonNode response = restClient.post()
-                    .uri(uriBuilder -> uriBuilder
-                            .path("/v1beta/models/{model}:generateContent")
-                            .queryParam("key", apiKey)
-                            .build(model))
+                    .uri(uriBuilder -> uriBuilder.path("/v1beta/models/{model}:generateContent")
+                            .queryParam("key", apiKey).build(model))
                     .body(body)
                     .retrieve()
                     .body(JsonNode.class);
-
-            String text = response == null
-                    ? null
+            String text = response == null ? null
                     : response.path("candidates").path(0).path("content").path("parts").path(0).path("text").asText(null);
-            return parseRecommendation(text);
-        } catch (RestClientException ex) {
-            throw new ExternalServiceException("Gemini recommendation failed. Please try again later.");
+            return parseGuidance(text);
+        } catch (RuntimeException ex) {
+            return null;
         }
     }
 
-    private String buildPrompt(AiRecommendationRequest request) {
+    private String buildPrompt(
+            AiRecommendationRequest request,
+            VehicleSpec selected,
+            VehicleSpec recommended,
+            boolean suitable,
+            String warning,
+            double etaMinutes,
+            double fare,
+            LocalDateTime scheduledPickupAt,
+            LocalDateTime estimatedArrivalAt,
+            String vehicleComparison) {
         return """
-                You are RideGo's vehicle recommendation engine. Recommend among Sedan, SUV, and Premium only.
-                Return only valid JSON with these exact keys:
-                {
-                  "bestValueOption": "Sedan",
-                  "bestComfortOption": "SUV",
-                  "bestPremiumOption": "Premium",
-                  "recommendationSummary": "Short passenger-facing summary."
-                }
+                You are the AI Ride Planner for RideGo.
+                Write a concise, friendly recommendation for the passenger BEFORE they choose a vehicle.
+                Use ONLY the backend-provided values below — do not invent or recalculate anything.
 
-                Route and fare context:
-                {
-                  "distanceKm": %.2f,
-                  "etaMinutes": %.1f,
-                  "sedanFare": %.2f,
-                  "suvFare": %.2f,
-                  "premiumFare": %.2f
-                }
+                Structure your response like this (2–4 sentences total):
+                1. State the recommended vehicle and why (passenger + luggage fit, ETA, cost).
+                2. Mention any other suitable alternatives with their ETA and cost.
+                3. If the passenger has already selected a vehicle that differs from the recommended one, note it briefly.
+                4. If a pickup time is provided, mention the estimated arrival time.
+                Do NOT tell the user when to depart. Do NOT repeat capacity numbers unless relevant to suitability.
+
+                Return ONLY JSON: {"plannerGuidance":"your 2-4 sentence guidance here."}
+
+                Backend-provided facts:
+                pickup=%s
+                destination=%s
+                distanceKm=%.2f
+                passengers=%d
+                luggage=%d
+                selectedVehicle=%s
+                recommendedVehicle=%s
+                selectedSuitable=%s
+                capacityWarning=%s
+                scheduledPickupAt=%s
+                estimatedArrivalAt=%s
+
+                All vehicle options:
+                %s
                 """.formatted(
-                request.getDistanceKm(),
-                request.getEtaMinutes(),
-                request.getSedanFare(),
-                request.getSuvFare(),
-                request.getPremiumFare()
-        );
+                request.getPickupLocation(), request.getDestination(), request.getDistanceKm(),
+                request.getPassengerCount(), request.getLuggageCount(),
+                selected.type(),
+                recommended == null ? "none" : recommended.type(),
+                suitable, valueOrNone(warning),
+                valueOrNone(scheduledPickupAt), valueOrNone(estimatedArrivalAt),
+                vehicleComparison);
     }
 
-    private AiRecommendationResponse parseRecommendation(String text) {
+    private String parseGuidance(String text) {
         if (!hasText(text)) {
-            throw new ExternalServiceException("Gemini did not return a recommendation.");
+            return null;
         }
-
         try {
             JsonNode json = objectMapper.readTree(stripJsonFence(text));
-            String bestValue = readVehicleOption(json, "bestValueOption", "Sedan");
-            String bestComfort = readVehicleOption(json, "bestComfortOption", "SUV");
-            String bestPremium = readVehicleOption(json, "bestPremiumOption", "Premium");
-            String summary = json.path("recommendationSummary").asText("").trim();
-            if (!hasText(summary)) {
-                summary = "Sedan offers the lowest fare for this route. SUV is recommended for groups or luggage. Premium provides the highest comfort and luxury experience.";
-            }
-            return new AiRecommendationResponse(bestValue, bestComfort, bestPremium, summary);
+            String guidance = json.path("plannerGuidance").asText("").trim();
+            return hasText(guidance) ? guidance : null;
         } catch (Exception ex) {
-            throw new ExternalServiceException("Gemini returned an unreadable recommendation.");
+            return null;
         }
     }
 
-    private String readVehicleOption(JsonNode json, String field, String fallback) {
-        String value = json.path(field).asText(fallback).trim();
-        if ("sedan".equalsIgnoreCase(value)) {
-            return "Sedan";
+    private String buildFallbackGuidance(
+            AiRecommendationRequest request,
+            List<VehicleSpec> allSpecs,
+            VehicleSpec selected,
+            VehicleSpec recommended,
+            boolean suitable,
+            LocalDateTime estimatedArrivalAt) {
+
+        // Build recommendation sentence
+        String recSentence;
+        if (recommended == null) {
+            recSentence = "No single vehicle can accommodate " + request.getPassengerCount()
+                    + " passengers and " + request.getLuggageCount() + " bags.";
+        } else {
+            double recEta = VehicleCatalog.calculateEtaMinutes(request.getDistanceKm(), recommended.type());
+            double recFare = VehicleCatalog.calculateFare(request.getDistanceKm(), recommended.type());
+            recSentence = "I recommend the " + recommended.type() + " for " + request.getPassengerCount()
+                    + " passenger" + (request.getPassengerCount() == 1 ? "" : "s") + " and "
+                    + request.getLuggageCount() + " bag" + (request.getLuggageCount() == 1 ? "" : "s")
+                    + " — ETA ~" + Math.round(recEta) + " min, fare ₹" + String.format("%.0f", recFare) + ".";
         }
-        if ("suv".equalsIgnoreCase(value)) {
-            return "SUV";
+
+        // Build alternatives sentence
+        StringBuilder alts = new StringBuilder();
+        for (VehicleSpec spec : allSpecs) {
+            if (recommended != null && spec.type().equals(recommended.type())) continue;
+            if (!VehicleCatalog.isSuitable(spec, request.getPassengerCount(), request.getLuggageCount())) continue;
+            double aEta = VehicleCatalog.calculateEtaMinutes(request.getDistanceKm(), spec.type());
+            double aFare = VehicleCatalog.calculateFare(request.getDistanceKm(), spec.type());
+            if (alts.length() > 0) alts.append(" ");
+            alts.append(spec.type()).append(" (~").append(Math.round(aEta)).append(" min, ₹")
+                    .append(String.format("%.0f", aFare)).append(") is also suitable.");
         }
-        if ("premium".equalsIgnoreCase(value)) {
-            return "Premium";
-        }
-        return fallback;
+
+        // Arrival hint
+        String arrival = estimatedArrivalAt == null ? ""
+                : " Estimated arrival at " + estimatedArrivalAt.format(DateTimeFormatter.ofPattern("h:mm a")) + ".";
+
+        return recSentence + (alts.length() > 0 ? " " + alts : "") + arrival;
+    }
+
+    private String capacityWarning(VehicleSpec selected, AiRecommendationRequest request) {
+        return selected.type() + " supports up to " + selected.seatingCapacity() + " passengers and "
+                + selected.luggageCapacity() + " bags, but this trip has " + request.getPassengerCount()
+                + " passengers and " + request.getLuggageCount() + " bags.";
     }
 
     private String stripJsonFence(String text) {
@@ -143,10 +251,8 @@ public class GeminiServiceImpl implements GeminiService {
         return trimmed;
     }
 
-    private void ensureApiKeyConfigured() {
-        if (!hasText(apiKey)) {
-            throw new ExternalServiceException("GEMINI_API_KEY is not configured on the server.");
-        }
+    private String valueOrNone(Object value) {
+        return value == null ? "none" : value.toString();
     }
 
     private boolean hasText(String value) {

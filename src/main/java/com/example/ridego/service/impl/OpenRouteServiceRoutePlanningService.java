@@ -4,9 +4,11 @@ import com.example.ridego.dto.CoordinateDto;
 import com.example.ridego.dto.GeocodeResponse;
 import com.example.ridego.dto.RoutePlanRequest;
 import com.example.ridego.dto.RoutePlanResponse;
+import com.example.ridego.dto.VehicleOptionResponse;
 import com.example.ridego.exception.BadRequestException;
 import com.example.ridego.exception.ExternalServiceException;
 import com.example.ridego.service.RoutePlanningService;
+import com.example.ridego.util.VehicleCatalog;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -24,13 +26,6 @@ public class OpenRouteServiceRoutePlanningService implements RoutePlanningServic
 
     private static final String ORS_BASE_URL = "https://api.openrouteservice.org";
     private static final String PROFILE = "driving-car";
-    private static final double SEDAN_BASE_FARE = 100.0;
-    private static final double SEDAN_PER_KM_FARE = 12.0;
-    private static final double SUV_BASE_FARE = 150.0;
-    private static final double SUV_PER_KM_FARE = 18.0;
-    private static final double PREMIUM_BASE_FARE = 250.0;
-    private static final double PREMIUM_PER_KM_FARE = 25.0;
-
     private final String apiKey;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
@@ -109,20 +104,32 @@ public class OpenRouteServiceRoutePlanningService implements RoutePlanningServic
             }
 
             double distanceKilometers = round(distanceMeters / 1000.0, 2);
-            double sedanFare = calculateFare(distanceKilometers, SEDAN_BASE_FARE, SEDAN_PER_KM_FARE);
-            double suvFare = calculateFare(distanceKilometers, SUV_BASE_FARE, SUV_PER_KM_FARE);
-            double premiumFare = calculateFare(distanceKilometers, PREMIUM_BASE_FARE, PREMIUM_PER_KM_FARE);
+            List<VehicleOptionResponse> vehicleOptions = VehicleCatalog.all().stream()
+                    .map(spec -> new VehicleOptionResponse(
+                            spec.type(),
+                            spec.seatingCapacity(),
+                            spec.luggageCapacity(),
+                            spec.averageSpeedKph(),
+                            VehicleCatalog.calculateEtaMinutes(distanceKilometers, spec.type()),
+                            VehicleCatalog.calculateFare(distanceKilometers, spec.type())
+                    ))
+                    .toList();
+            double sedanFare = VehicleCatalog.calculateFare(distanceKilometers, "Sedan");
+            double suvFare = VehicleCatalog.calculateFare(distanceKilometers, "SUV");
+            double premiumFare = VehicleCatalog.calculateFare(distanceKilometers, "Premium");
+            double sedanDurationMinutes = VehicleCatalog.calculateEtaMinutes(distanceKilometers, "Sedan");
             return new RoutePlanResponse(
                     pickup,
                     drop,
                     distanceMeters,
                     distanceKilometers,
-                    durationSeconds,
-                    round(durationSeconds / 60.0, 1),
+                    sedanDurationMinutes * 60.0,
+                    sedanDurationMinutes,
                     sedanFare,
                     sedanFare,
                     suvFare,
                     premiumFare,
+                    vehicleOptions,
                     routeGeoJson
             );
         } catch (ExternalServiceException ex) {
@@ -195,7 +202,4 @@ public class OpenRouteServiceRoutePlanningService implements RoutePlanningServic
         return Math.round(value * scale) / scale;
     }
 
-    private double calculateFare(double distanceKilometers, double baseFare, double perKmFare) {
-        return round(baseFare + (distanceKilometers * perKmFare), 2);
-    }
 }

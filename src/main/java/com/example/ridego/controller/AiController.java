@@ -22,6 +22,6 @@ public class AiController {
 
     @PostMapping("/recommendation")
     public AiRecommendationResponse recommendation(@Valid @RequestBody AiRecommendationRequest request) {
-        return geminiService.recommendVehicle(request);
+        return geminiService.planRide(request);
     }
 }

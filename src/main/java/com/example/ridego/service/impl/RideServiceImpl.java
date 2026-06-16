@@ -15,6 +15,8 @@ import com.example.ridego.repository.PaymentRepository;
 import com.example.ridego.repository.RideRepository;
 import com.example.ridego.repository.UserRepository;
 import com.example.ridego.service.RideService;
+import com.example.ridego.util.VehicleCatalog;
+import com.example.ridego.util.VehicleCatalog.VehicleSpec;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -33,18 +35,10 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 @Service
 public class RideServiceImpl implements RideService {
 
-    private static final Set<String> VEHICLE_TYPES = Set.of("Sedan", "SUV", "Premium");
-    private static final double SEDAN_BASE_FARE = 100.0;
-    private static final double SEDAN_PER_KM_FARE = 12.0;
-    private static final double SUV_BASE_FARE = 150.0;
-    private static final double SUV_PER_KM_FARE = 18.0;
-    private static final double PREMIUM_BASE_FARE = 250.0;
-    private static final double PREMIUM_PER_KM_FARE = 25.0;
     private static final String INR = "INR";
 
     private final RideRepository rideRepo;
@@ -89,6 +83,10 @@ public class RideServiceImpl implements RideService {
 
         String vehicleType = normalizeVehicleType(request.getVehicleType());
         validateVehicleType(vehicleType);
+        int passengerCount = request.getPassengerCount() == null ? 1 : request.getPassengerCount();
+        int luggageCount = request.getLuggageCount() == null ? 0 : request.getLuggageCount();
+        VehicleSpec vehicle = VehicleCatalog.spec(vehicleType);
+        validateCapacity(vehicle, passengerCount, luggageCount);
         ensureDriverAvailable(vehicleType);
 
         Ride ride = Ride.builder()
@@ -100,10 +98,14 @@ public class RideServiceImpl implements RideService {
                 .dropLatitude(request.getDropLatitude())
                 .dropLongitude(request.getDropLongitude())
                 .distanceMeters(request.getDistanceMeters())
-                .durationSeconds(request.getDurationSeconds())
+                .durationSeconds(calculateDurationSeconds(request.getDistanceMeters(), vehicleType))
                 .vehicleType(vehicleType)
                 .fare(calculateFare(request.getDistanceMeters(), vehicleType))
-                .scheduledAt(request.getScheduledAt())
+                .scheduledAt(request.getScheduledAt()) // user's chosen pickup time, stored as-is
+                .passengerCount(passengerCount)
+                .luggageCount(luggageCount)
+                .vehicleSeatingCapacity(vehicle.seatingCapacity())
+                .vehicleLuggageCapacity(vehicle.luggageCapacity())
                 .paymentStatus("UNPAID")
                 .status("REQUESTED")
                 .createdAt(new Date())
@@ -189,14 +191,8 @@ public class RideServiceImpl implements RideService {
         if (!"ACCEPTED".equals(ride.getStatus())) {
             throw new BadRequestException("Ride cannot be completed");
         }
-
-        if (!ride.getDriverId().equals(user.getId()) && !ride.getUserId().equals(user.getId())) {
-            throw new BadRequestException("Only the driver or passenger can complete this ride");
-        }
-
         ride.setCompletedAt(new Date());
         ride.setStatus("COMPLETED");
-
         return rideRepo.save(ride);
     }
 
@@ -206,12 +202,11 @@ public class RideServiceImpl implements RideService {
         Ride ride = getRide(rideId);
 
         if (!ride.getUserId().equals(user.getId())) {
-            throw new BadRequestException("Only the passenger can cancel this ride");
+            throw new BadRequestException("You can only cancel your own rides");
         }
-        if (!"REQUESTED".equals(ride.getStatus()) && !"ACCEPTED".equals(ride.getStatus())) {
-            throw new BadRequestException("Completed rides cannot be cancelled");
+        if (!List.of("REQUESTED", "ACCEPTED").contains(ride.getStatus())) {
+            throw new BadRequestException("Only active rides can be cancelled");
         }
-
         ride.setCancelledAt(new Date());
         ride.setStatus("CANCELLED");
         return rideRepo.save(ride);
@@ -219,39 +214,37 @@ public class RideServiceImpl implements RideService {
 
     @Override
     public Ride rateDriver(String username, String rideId, RideRatingRequest request) {
-        User passenger = getUser(username);
+        User user = getUser(username);
         Ride ride = getRide(rideId);
 
-        if (!ride.getUserId().equals(passenger.getId())) {
-            throw new BadRequestException("Only the passenger can rate this ride");
+        if (!ride.getUserId().equals(user.getId())) {
+            throw new BadRequestException("You can only rate your own rides");
         }
-        if (!"COMPLETED".equals(ride.getStatus()) && !"PAID".equals(ride.getStatus())) {
-            throw new BadRequestException("Only completed rides can be rated");
-        }
-        if (ride.getDriverRating() != null) {
-            throw new BadRequestException("Driver already rated for this ride");
+        if (!List.of("COMPLETED", "PAID").contains(ride.getStatus())) {
+            throw new BadRequestException("Only completed or paid rides can be rated");
         }
         if (!hasText(ride.getDriverId())) {
-            throw new BadRequestException("Ride has no assigned driver");
+            throw new BadRequestException("No driver assigned to this ride");
+        }
+        if (ride.getDriverRating() != null) {
+            throw new BadRequestException("Driver has already been rated for this ride");
         }
 
-        User driver = userRepo.findById(ride.getDriverId())
-                .orElseThrow(() -> new NotFoundException("Driver not found"));
-        long oldCount = safeLong(driver.getTotalRatingsCount());
-        double oldAverage = safeDouble(driver.getAverageRating());
-        long newCount = oldCount + 1;
-        double newAverage = round(((oldAverage * oldCount) + request.getRating()) / newCount, 2);
-
-        driver.setTotalRatingsCount(newCount);
-        driver.setAverageRating(newAverage);
-        userRepo.save(driver);
-
         ride.setDriverRating(request.getRating());
-        ride.setDriverFeedback(trimToNull(request.getFeedback()));
-        ride.setDriverAverageRating(newAverage);
-        ride.setDriverRatingsCount(newCount);
+        ride.setDriverFeedback(request.getFeedback());
         ride.setRatedAt(new Date());
-        return rideRepo.save(ride);
+        Ride savedRide = rideRepo.save(ride);
+
+        // Update driver's average rating
+        userRepo.findById(ride.getDriverId()).ifPresent(driver -> {
+            Long count = safeLong(driver.getTotalRatingsCount()) + 1;
+            double avg = (safeDouble(driver.getAverageRating()) * (count - 1) + request.getRating()) / count;
+            driver.setAverageRating(round(avg, 2));
+            driver.setTotalRatingsCount(count);
+            userRepo.save(driver);
+        });
+
+        return savedRide;
     }
 
     @Override
@@ -262,20 +255,17 @@ public class RideServiceImpl implements RideService {
         ensureRazorpayConfigured();
 
         long amountPaise = Math.round(safeDouble(ride.getFare()) * 100);
-        if (amountPaise <= 0) {
-            throw new BadRequestException("Ride fare is missing");
-        }
+        Map<String, Object> orderRequest = Map.of(
+                "amount", amountPaise,
+                "currency", INR,
+                "receipt", "ridego_" + ride.getId()
+        );
 
         try {
             JsonNode response = razorpayClient.post()
                     .uri("/orders")
                     .header(HttpHeaders.AUTHORIZATION, basicAuthHeader())
-                    .body(Map.of(
-                            "amount", amountPaise,
-                            "currency", INR,
-                            "receipt", "ride_" + ride.getId(),
-                            "payment_capture", 1
-                    ))
+                    .body(orderRequest)
                     .retrieve()
                     .body(JsonNode.class);
 
@@ -375,43 +365,25 @@ public class RideServiceImpl implements RideService {
     }
 
     private double calculateFare(Double distanceMeters, String vehicleType) {
-        double baseFare = switch (vehicleType) {
-            case "SUV" -> SUV_BASE_FARE;
-            case "Premium" -> PREMIUM_BASE_FARE;
-            default -> SEDAN_BASE_FARE;
-        };
-        double perKmFare = switch (vehicleType) {
-            case "SUV" -> SUV_PER_KM_FARE;
-            case "Premium" -> PREMIUM_PER_KM_FARE;
-            default -> SEDAN_PER_KM_FARE;
-        };
-        if (distanceMeters == null || distanceMeters <= 0) {
-            return baseFare;
-        }
-        double distanceKm = distanceMeters / 1000.0;
-        return round(baseFare + (distanceKm * perKmFare), 2);
+        return VehicleCatalog.calculateFare(distanceMeters == null ? 0 : distanceMeters / 1000.0, vehicleType);
+    }
+
+    private double calculateDurationSeconds(Double distanceMeters, String vehicleType) {
+        return VehicleCatalog.calculateEtaMinutes(distanceMeters == null ? 0 : distanceMeters / 1000.0, vehicleType) * 60.0;
     }
 
     private String normalizeVehicleType(String vehicleType) {
-        if (!hasText(vehicleType)) {
-            return null;
-        }
-        String value = vehicleType.trim().toLowerCase();
-        if ("suv".equals(value)) {
-            return "SUV";
-        }
-        if ("sedan".equals(value)) {
-            return "Sedan";
-        }
-        if ("premium".equals(value)) {
-            return "Premium";
-        }
-        return vehicleType.trim();
+        return VehicleCatalog.normalize(vehicleType);
     }
 
     private void validateVehicleType(String vehicleType) {
-        if (!VEHICLE_TYPES.contains(vehicleType)) {
-            throw new BadRequestException("Vehicle type must be Sedan, SUV, or Premium");
+        VehicleCatalog.spec(vehicleType);
+    }
+
+    private void validateCapacity(VehicleSpec vehicle, int passengerCount, int luggageCount) {
+        if (!VehicleCatalog.isSuitable(vehicle, passengerCount, luggageCount)) {
+            throw new BadRequestException(vehicle.type() + " supports up to " + vehicle.seatingCapacity()
+                    + " passengers and " + vehicle.luggageCapacity() + " bags. Choose a suitable vehicle.");
         }
     }
 
@@ -469,10 +441,6 @@ public class RideServiceImpl implements RideService {
     private double round(double value, int places) {
         double scale = Math.pow(10, places);
         return Math.round(value * scale) / scale;
-    }
-
-    private String trimToNull(String value) {
-        return hasText(value) ? value.trim() : null;
     }
 
     private boolean hasText(String value) {
