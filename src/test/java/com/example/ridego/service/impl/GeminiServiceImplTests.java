@@ -14,18 +14,25 @@ class GeminiServiceImplTests {
     private final GeminiServiceImpl service = new GeminiServiceImpl("", "gemini-2.5-flash", new ObjectMapper());
 
     @Test
-    void plannerUsesBackendCalculatedSuitabilityEtaAndDeparture() {
+    void plannerUsesBackendCalculatedSuitabilityEtaAndEstimatedArrival() {
         AiRecommendationRequest request = request("Sedan", 5, 3);
-        request.setDesiredArrivalAt(LocalDateTime.of(2026, 6, 15, 20, 0));
+        // User picks up at 19:15; ETA for Sedan over 30km ~= 40 min → arrival ~19:55
+        request.setScheduledPickupAt(LocalDateTime.of(2026, 6, 15, 19, 15));
 
         AiRecommendationResponse response = service.planRide(request);
 
+        // Sedan seats 4 — not suitable for 5 passengers
         assertThat(response.isSuitable()).isFalse();
+        // SUV (6 seats, 4 bags) is the smallest suitable vehicle
         assertThat(response.getRecommendedVehicle()).isEqualTo("SUV");
         assertThat(response.getCapacityWarning()).contains("up to 4 passengers and 2 bags");
+        // Sedan ETA over 30 km at 45 km/h = 40.0 min
         assertThat(response.getEtaMinutes()).isEqualTo(40.0);
-        assertThat(response.getLatestDepartureAt()).isEqualTo(LocalDateTime.of(2026, 6, 15, 19, 20));
-        assertThat(response.getRecommendedDepartureAt()).isEqualTo(LocalDateTime.of(2026, 6, 15, 19, 15));
+        // scheduledPickupAt is echoed back unchanged
+        assertThat(response.getScheduledPickupAt()).isEqualTo(LocalDateTime.of(2026, 6, 15, 19, 15));
+        // estimatedArrivalAt = scheduledPickupAt + roundedEtaMinutes (40)
+        assertThat(response.getEstimatedArrivalAt()).isEqualTo(LocalDateTime.of(2026, 6, 15, 19, 55));
+        // No API key → AI not generated, fallback guidance used
         assertThat(response.isAiGenerated()).isFalse();
     }
 
